@@ -1,0 +1,131 @@
+{{- range $name, $cfg := .Values.configs }}
+{{- if $cfg.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway-{{ $name }}
+  labels:
+    app: gateway
+    config: {{ $name }}
+spec:
+  replicas: {{ $cfg.replicas }}
+  selector:
+    matchLabels:
+      app: gateway
+      config: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app: gateway
+        config: {{ $name }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ $.Values.service.port }}"
+        prometheus.io/path: "/metrics"
+    spec:
+      {{- if $.Values.image.pullSecret }}
+      imagePullSecrets:
+        - name: {{ $.Values.image.pullSecret }}
+      {{- end }}
+      # GPU-only nodes: without this, the scheduler may place the pod on a
+      # non-GPU node where it will hang forever failing readiness (the
+      # nvidia.com/gpu resource request/limit alone does not guarantee this
+      # on all cluster setups -- explicit affinity is the reliable version).
+      nodeSelector:
+        {{- toYaml ($.Values.gpuNodeSelector | default (dict "nvidia.com/gpu.present" "true")) | nindent 8 }}
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+      terminationGracePeriodSeconds: 45  # must exceed gateway's DRAIN_TIMEOUT_S
+      containers:
+        - name: gateway
+          image: "{{ $.Values.image.repository }}:{{ $.Values.image.tag }}"
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          env:
+            - name: MODEL_CONFIG
+              value: {{ $name }}
+            - name: GATEWAY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gateway-secrets
+                  key: api-key
+            - name: DRAIN_TIMEOUT_S
+              value: "30"
+          ports:
+            - containerPort: {{ $.Values.service.port }}
+          resources:
+            {{- toYaml $cfg.resources | nindent 12 }}
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /data/hf-cache
+          # startupProbe: model loading (esp. first-time HF download) can take
+          # minutes. A fixed 30s initialDelaySeconds on readiness/liveness alone
+          # causes CrashLoopBackOff on cold start. This gives up to 10 minutes
+          # before liveness/readiness are even evaluated.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: {{ $.Values.service.port }}
+            failureThreshold: 60
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: {{ $.Values.service.port }}
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ $.Values.service.port }}
+            periodSeconds: 20
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              # Give the readiness probe time to flip false and be removed
+              # from Service endpoints before SIGTERM starts the drain timer.
+              exec:
+                command: ["sh", "-c", "sleep 5"]
+      volumes:
+        - name: hf-cache
+          {{- if $.Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: hf-model-cache
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-{{ $name }}
+  labels:
+    app: gateway
+    config: {{ $name }}
+spec:
+  type: {{ $.Values.service.type }}
+  selector:
+    app: gateway
+    config: {{ $name }}
+  ports:
+    - port: {{ $.Values.service.port }}
+      targetPort: {{ $.Values.service.port }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gateway-{{ $name }}-pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: gateway
+      config: {{ $name }}
+---
+{{- end }}
+{{- end }}

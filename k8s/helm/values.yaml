@@ -1,0 +1,70 @@
+image:
+  repository: your-registry/llm-inference-optimizer
+  tag: latest
+  pullPolicy: IfNotPresent
+  pullSecret: ""   # set if your registry is private, e.g. "ghcr-creds"
+
+# Set true only for local `helm template`/dry-run convenience. In real
+# clusters, create gateway-secrets out-of-band (see templates/secrets.yaml)
+# and leave this false so you never accidentally ship a placeholder key.
+createPlaceholderSecret: false
+
+# GPU node targeting. Adjust the label to match your cluster's node pool
+# labeling convention (GKE/EKS/AKS auto-label GPU nodes differently).
+gpuNodeSelector:
+  nvidia.com/gpu.present: "true"
+
+persistence:
+  enabled: true          # false = emptyDir (re-downloads weights on every pod restart)
+  size: 100Gi
+  accessMode: ReadWriteOnce
+  storageClass: ""       # leave blank to use cluster default
+
+# One deployment per quantization variant. Disable ones you don't have
+# GPU capacity to run simultaneously (e.g. on a single-GPU dev box, run
+# them one at a time and just swap `configs.*.enabled`).
+configs:
+  fp16:
+    enabled: true
+    replicas: 1
+    resources:
+      limits:
+        nvidia.com/gpu: 1
+        memory: "24Gi"
+      requests:
+        cpu: "2"
+        memory: "16Gi"
+  int8:
+    enabled: false
+    replicas: 1
+    resources:
+      limits:
+        nvidia.com/gpu: 1
+        memory: "16Gi"
+      requests:
+        cpu: "2"
+        memory: "12Gi"
+  fp8:
+    enabled: false
+    replicas: 1
+    resources:
+      limits:
+        nvidia.com/gpu: 1
+        memory: "16Gi"
+      requests:
+        cpu: "2"
+        memory: "12Gi"
+
+service:
+  port: 8000
+  type: ClusterIP
+
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 5
+  # Target average queue depth per pod before scaling out.
+  targetQueueDepth: 10
+
+prometheus:
+  scrapeInterval: 15s

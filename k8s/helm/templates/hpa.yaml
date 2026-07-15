@@ -1,0 +1,40 @@
+{{- if .Values.autoscaling.enabled }}
+{{- range $name, $cfg := .Values.configs }}
+{{- if $cfg.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gateway-{{ $name }}-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gateway-{{ $name }}
+  minReplicas: {{ $.Values.autoscaling.minReplicas }}
+  maxReplicas: {{ $.Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          # Exposed via Prometheus Adapter from gateway_queue_depth{config="..."}
+          name: gateway_queue_depth
+        target:
+          type: AverageValue
+          averageValue: "{{ $.Values.autoscaling.targetQueueDepth }}"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+---
+{{- end }}
+{{- end }}
+{{- end }}
