@@ -1,0 +1,54 @@
+# Save as .github/workflows/deploy.yaml in your repo root.
+name: build-test-deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install deps
+        run: |
+          pip install -r gateway/requirements.txt
+          pip install ruff pytest
+      - name: Lint
+        run: ruff check gateway/ eval/ benchmark/
+      - name: Unit tests
+        run: pytest tests/ -v
+
+  build-and-push:
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./gateway
+          push: true
+          tags: ghcr.io/${{ github.repository }}/llm-inference-optimizer:${{ github.sha }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up kubeconfig
+        run: echo "${{ secrets.KUBE_CONFIG_B64 }}" | base64 -d > $HOME/.kube/config
+      - name: Helm upgrade
+        run: |
+          helm upgrade --install llm-optimizer ./k8s/helm \
+            --set image.tag=${{ github.sha }} \
+            --namespace inference --create-namespace
